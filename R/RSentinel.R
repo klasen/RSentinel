@@ -1,83 +1,65 @@
 library(RCurl)
 library(rjson)
 
-
-opts <- curlOptions(
+connect <- function(
+  host = "localhost",
+  port = 8443,
+  username = NULL,
+  password = NULL,
   timeout = 120,
   connecttimeout = 5,
   verbose = TRUE,
-  useragent = "RSentinel/0.1",
-  sslversion = SSLVERSION_TLSv1,
   ssl.verifypeer = FALSE,
-  ssl.verifyhost=FALSE,
-  customrequest = "GET"
-)
-
-ch <- getCurlHandle()
-
-authJSON<-getURL( 
-  paste("https://", server, ":8443/SentinelAuthServices/auth/tokens", sep=""),
-  customrequest = "POST",
-  userpwd = paste(username, password, sep=":"),
-  httpauth = AUTH_BASIC,
-  .opts = opts, 
-  curl = ch 
-)
-
-samlToken <- fromJSON(authJSON)$Token
-authorization <- paste("X-SAML",samlToken, sep=" ")
-
-opts <- curlOptions(
-  httpheader = c(
-    "Authorization"=authorization,
-    "Accept"="application/json"#,
-    #"Content-Type"="application/json"
+  ssl.verifyhost= FALSE
+  ) {
+  
+  sentinel <- list(
+    #host = host,
+    #port = port
+    authority = paste("https://", host, ":", port, sep=""),
+    baseurl = paste("https://", host, ":", port, "/SentinelRESTServices/objects", sep="")
   )
-)
-
-opts.post <- curlOptions(
-  httpheader = c(
-    opts$httpheader,
-    "Content-Type"="application/json"
+  
+  opts <- curlOptions(
+    timeout = timeout,
+    connecttimeout = connecttimeout,
+    verbose = verbose,
+    useragent = "RSentinel/0.1",
+    sslversion = SSLVERSION_TLSv1,
+    ssl.verifypeer = ssl.verifypeer,
+    ssl.verifyhost=ssl.verifyhost,
+    customrequest = "GET"
   )
-)
-
-
-collectorJSON <-  getURL(
-  paste("https://", server, ":8443/SentinelRESTServices/objects/collector", sep=""),
-  customrequest = "GET",
-  #httpheader = c( "Authorization"=authorization)
-  .opts = opts,
-  curl = ch
-)
-
-getCollectorDataframeFromJSON <- function(collectorJSON) {
-  namelist <- NULL
-  urllist <- NULL
-  statuslist <- NULL
-  datelist <- NULL
-  JSONList <- fromJSON(collectorJSON)
-  results <- JSONList$objects
-  for (i in 1:length(results)) {
-    namelist <- c(namelist, results[i][[1]]$name )
-    urllist <- c(urllist, results[i][[1]]$meta$"@href")
-    onlist <- c(statuslist, results[i][[1]]$on)
-    pluginlist <- c(datelist, results[i][[1]]$plugin)
+  
+  ch <- getCurlHandle()
+  
+  auth.response<-getURL( 
+    paste("https://", host, ":", port, "/SentinelAuthServices/auth/tokens", sep=""),
+    customrequest = "POST",
+    userpwd = paste(username, password, sep=":"),
+    httpauth = AUTH_BASIC,
+    .opts = opts, 
+    curl = ch 
+  )
+  
+  if (getCurlInfo(ch)$response.code == 201) {
+    sentinel$ch <- ch
+    sentinel$samlToken <- fromJSON(auth.response)$Token
+    sentinel$opts <- curlOptions(
+      httpheader = c(
+        "Authorization"=paste("X-SAML",sentinel$samlToken, sep=" "),
+        "Accept"="application/json",
+        "Content-Type"="application/json"
+      )
+    )
+    return(sentinel)
+    
+  } else {
+    return(NA)
   }
-  collectorDF = data.frame(name=namelist,href=urllist,on=onlist,plugin=pluginlist,stringsAsFactors=T)
-  return(collectorDF)
 }
 
-cdf <- getCollectorDataframeFromJSON(collectorJSON)
-
-epsJSON <- getURL(
-  paste("https://", server, ":8443/SentinelRESTServices/objects/eps-history", sep=""),
-  customrequest = "GET",
-  .opts = opts,
-  curl = ch
-)
-
-createSearchJob <- function(filter) {
+startEventSearch <- function(sentinel, filter="sev:[0 TO 5]") {
   params <- list(
     "filter"=filter,
     "start"="2014-11-27T20:08:34.940Z",
@@ -87,39 +69,118 @@ createSearchJob <- function(filter) {
     "type"="user"
   )
   content <- getURL(
-    paste("https://", server, ":8443/SentinelRESTServices/objects/event-search", sep=""),
+    paste(sentinel$baseurl, "event-search", sep="/"),
     customrequest = "POST",
     postfields = toJSON(params),
-    #httpheader = c( "Content-Type"="application/json", opts$httpheader),
-    .opts = opts.post,
-    curl = ch
+    .opts = sentinel$opts,
+    curl = sentinel$ch
   )
   job <- NULL
-  if (getCurlInfo(ch)$response.code == 201) {
+  if (getCurlInfo(sentinel$ch)$response.code == 201) {
     job <- fromJSON(content)
   }
   return(job)
 }
 
-createSearchTermJob <- function(job) {
+getEventSearch <- function(sentinel, job) {
+  content <- getURL(
+    customrequest = "GET",
+    #paste(sentinel$authority, job$meta$"@href", sep=""),
+    job$meta$"@href",
+    .opts = sentinel$opts,
+    curl = sentinel$ch
+  )
+  job <- NULL
+  if (getCurlInfo(sentinel$ch)$response.code == 200) {
+    print(content)
+    job <- fromJSON(content)
+  }
+  return(job)
+}
+
+getEventSearchResults <- function(sentinel, job) {
+  response <- getURL(
+    customrequest = "GET",
+    #paste(sentinel$authority, job$meta$"@href", sep=""),
+    job$results$"@href",
+    .opts = sentinel$opts,
+    curl = sentinel$ch
+  )
+  objects <- NULL
+  if (getCurlInfo(sentinel$ch)$response.code == 200) {
+    if (sentinel$verbose) {
+      print(response)
+    }
+    objects <- fromJSON(response)
+  }
+  return(objects)
+}
+
+startSearchTerms <- function(sentinel, job) {
   params <- list(
     "meta"=list("type"="search-terms"),
     "event-search"=list("@href"=job$meta$"@href"),
-    "field-names"= list("evt", "sip")
+    "field-names"= list("evt", "sip"),
+    "bottom-n" = 1000,
+    "top-n" = 1000
   )
-  content <- getURL(
+  response <- getURL(
     paste("https://", server, ":8443/SentinelRESTServices/objects/search-terms", sep=""),
     customrequest = "POST",
     postfields = toJSON(params),
-    #httpheader = c( "Content-Type"="application/json", opts$httpheader),
-    .opts = opts.post,
-    curl = ch
+    .opts = sentinel$opts,
+    curl = sentinel$ch
   )
   job <- NULL
-  if (getCurlInfo(ch)$response.code == 201) {
-    job <- fromJSON(content)
+  if (getCurlInfo(sentinel$ch)$response.code == 201) {
+    job <- fromJSON(response)
   }
   return(job)
 }
 
+getSearchTerms <- function(sentinel, job) {
+  response <- getURL(
+    customrequest = "GET",
+    job$meta$"@href",
+    .opts = sentinel$opts,
+    curl = sentinel$ch
+  )
+  job <- NULL
+  if (getCurlInfo(sentinel$ch)$response.code == 200) {
+    print(response)
+    job <- fromJSON(response)
+  }
+  return(job)
+}
 
+kvp2df <- function(content) {
+  value <- NULL
+  count <- NULL
+
+  for (i in 1:length(content$"fields"[[1]]$values)) {
+    value <- c(value, content$"fields"[[1]]$values[[i]]$value )
+    count <- c(count, content$"fields"[[1]]$values[[i]]$count)
+  }
+  df = data.frame(value=value,count=count,stringsAsFactors=T)
+  return(df)
+}
+
+getEpsHistory <- function(sentinel) {
+  response <- getURL(
+    customrequest = "GET",
+    paste(sentinel$baseurl, "eps-history", sep="/"),
+    .opts = sentinel$opts,
+    curl = sentinel$ch
+  )
+  result <- NULL
+  if (getCurlInfo(sentinel$ch)$response.code == 200) {
+    print(response)
+    result <- fromJSON(response)
+  }
+  return(result)
+  
+}
+
+parseDate <- function(date) {
+  return(strptime(d, "%Y-%m-%dT%H:%M:%OS", "UTC"))
+}
