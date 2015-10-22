@@ -168,19 +168,27 @@ kvp2df <- function(content) {
 getEpsHistory <- function(sentinel) {
   response <- getURL(
     customrequest = "GET",
-    paste(sentinel$baseurl, "eps-history", sep="/"),
+    paste(sentinel$baseurl, "eps-history",  sep="/"),
     .opts = sentinel$opts,
     curl = sentinel$ch
   )
-  result <- NULL
   if (getCurlInfo(sentinel$ch)$response.code == 200) {
     print(response)
     result <- fromJSON(response)
+    eps <- NULL
+    time <- NULL
+    
+    for (i in 1:length(result$objects[[1]]$data)) {
+      eps <- c(eps, as.integer(result$objects[[1]]$data[[i]]$eps ))
+      time <- c(time, parseDate(result$objects[[1]]$data[[i]]$time))
+    }
+    df = data.frame(eps=eps,time=time,stringsAsFactors=T)
+    return(df)
   }
-  return(result)
+  return(NULL)
   
 }
 
 parseDate <- function(date) {
-  return(strptime(d, "%Y-%m-%dT%H:%M:%OS", "UTC"))
+  return(strptime(date, "%Y-%m-%dT%H:%M:%OS", "UTC"))
 }
